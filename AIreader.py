@@ -1,18 +1,18 @@
 from pathlib import Path
 from openai import OpenAI
 import time
-from PyPDF2 import PdfReader
 import fitz  # PyMuPDF
 import requests
+from PyPDF2 import PdfReader  # 添加这行导入
 
 client = OpenAI(
-    api_key="your API key",# 替换为你的月之暗面API key
+    api_key="your moonshot api key",
     base_url="https://api.moonshot.cn/v1",
 )
 
 # 指定文献目录
-pdf_dir = Path("pdf directories")# 替换为你的文献目录
-output_dir = Path("output directories")# 替换为你想输出的目录
+pdf_dir = Path("your input directory")
+output_dir = Path("your output directory")
 output_dir.mkdir(exist_ok=True)
 
 prompt = """
@@ -140,15 +140,19 @@ def process_text_pdf(pdf_file):
 
 # 处理图片型PDF
 def process_image_pdf(pdf_file):
-    while True:
+    max_retries = 5
+    retry_count = 0
+    while retry_count < max_retries:
         try:
             file_object = client.files.create(file=pdf_file, purpose="file-extract")
             file_content = client.files.content(file_id=file_object.id).text
             return file_content
         except Exception as e:
-            print(f"上传失败: {e}")
+            retry_count += 1
+            print(f"上传失败({retry_count}/{max_retries}): {e}")
+            if retry_count >= max_retries:
+                return None
             time.sleep(60)
-            return None
 
 # 与AI对话并保存结果
 def chat_with_ai(content, output_file):
@@ -157,7 +161,9 @@ def chat_with_ai(content, output_file):
         {"role": "system", "content": content},
         {"role": "user", "content": "请形成文献笔记"},
     ]
-    while True:
+    max_retries = 5
+    retry_count = 0
+    while retry_count < max_retries:
         try:
             completion = client.chat.completions.create(
                 model="moonshot-v1-128k",
@@ -168,16 +174,22 @@ def chat_with_ai(content, output_file):
                 f.write(completion.choices[0].message.content)
             return True
         except Exception as e:
-            print(f"请求失败: {e}")
+            retry_count += 1
+            if hasattr(e, 'status_code') and e.status_code == 429:
+                print(f"速率限制触发({retry_count}/{max_retries})，跳过文件: {e}")
+                return False
+            print(f"请求失败({retry_count}/{max_retries}): {e}")
+            if retry_count >= max_retries:
+                return False
             time.sleep(30)
-            return False
 
 # 调用 DeepSeek API
 def call_deepseek(content, output_file):
     API_ENDPOINT = "https://api.siliconflow.cn/v1/chat/completions"
-    API_KEY = "your API key"  # 替换为你的 siliconflow API Key
+    API_KEY = "your siliconflow api key"
+    max_retries = 5
+    retry_count = 0
 
-    # 构造请求
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json"
@@ -199,34 +211,71 @@ def call_deepseek(content, output_file):
         ]
     }
 
-    # 发送请求
-    response = requests.post(API_ENDPOINT, json=payload, headers=headers)
-    if response.status_code == 200:
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(response.json()["choices"][0]["message"]["content"])
-        return True
-    else:
-        print(f"请求失败：{response.json()}")
-        return False
+    while retry_count < max_retries:
+        response = requests.post(API_ENDPOINT, json=payload, headers=headers)
+        if response.status_code == 200:
+            with open(output_file, "w", encoding="utf-8") as f:
+                f.write(response.json()["choices"][0]["message"]["content"])
+            return True
+        elif response.status_code == 429:
+            print(f"速率限制触发({retry_count}/{max_retries})，跳过文件: {response.json()}")
+            return False
+        elif response.status_code == 20042:
+            print(f"检测到特殊错误码20042({retry_count}/{max_retries})，将转为使用月之暗面API处理")
+            return False
+        else:
+            retry_count += 1
+            print(f"请求失败({retry_count}/{max_retries}): {response.json()}")
+            if retry_count >= max_retries:
+                return False
+            time.sleep(30)
 
-# 主程序
+
+import os
+import json
+
+# 在output_dir定义后添加
+processed_file = output_dir / "processed_files.json"
+
+# 主程序部分修改为
 failed_files = []
+processed_files = []
+
+# 加载已处理文件列表
+if processed_file.exists():
+    with open(processed_file, 'r') as f:
+        processed_files = json.load(f)
+
 for pdf_file in pdf_dir.glob("*.pdf"):
+    if pdf_file.name in processed_files:
+        print(f"跳过已处理文件: {pdf_file.name}")
+        continue
+        
     print(f"正在处理文件: {pdf_file.name}")
     output_file = output_dir / f"{pdf_file.stem}.md"
     
-    if is_text_pdf(pdf_file):
-        print("检测为文字型PDF，直接提取内容")
-        text_content = process_text_pdf(pdf_file)
-        if not call_deepseek(text_content, output_file):
-            failed_files.append(pdf_file.name)
-    else:
-        print("检测为图片型PDF，上传处理")
-        file_content = process_image_pdf(pdf_file)
-        if file_content and not chat_with_ai(file_content, output_file):
-            failed_files.append(pdf_file.name)
-    print(f"处理完成: {output_file.name}\n将在30秒后开始下一个文件的处理")
-    time.sleep(30)  # 每次请求后等待 30 秒，避免触发速率限制，如果权限足够，可以去掉这一行
+    try:
+        if is_text_pdf(pdf_file):
+            print("检测为文字型PDF，直接提取内容")
+            text_content = process_text_pdf(pdf_file)
+            if not call_deepseek(text_content, output_file):
+                failed_files.append(pdf_file.name)
+        else:
+            print("检测为图片型PDF，上传处理")
+            file_content = process_image_pdf(pdf_file)
+            if file_content and not chat_with_ai(file_content, output_file):
+                failed_files.append(pdf_file.name)
+        
+        # 处理成功则记录
+        processed_files.append(pdf_file.name)
+        with open(processed_file, 'w') as f:
+            json.dump(processed_files, f)
+            
+    except Exception as e:
+        print(f"处理文件 {pdf_file.name} 时出错: {e}")
+        failed_files.append(pdf_file.name)
+    
+    time.sleep(30)  # 每次请求后等待 30 秒，避免触发速率限制
 
 # 输出失败文件列表
 if failed_files:
