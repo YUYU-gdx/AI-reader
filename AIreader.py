@@ -1,20 +1,32 @@
 from pathlib import Path
-from openai import OpenAI
+import json
 import time
-import fitz  # PyMuPDF
 import requests
-from PyPDF2 import PdfReader  # 添加这行导入
+from openai import OpenAI
 
+# 加载配置文件
+with open('config.json', 'r', encoding='utf-8') as f:
+    config = json.load(f)
+
+# 初始化API客户端
 client = OpenAI(
-    api_key="your moonshot api key",
+    api_key=config["moonshot_api_key"],
     base_url="https://api.moonshot.cn/v1",
 )
 
-# 指定文献目录
-pdf_dir = Path("your input directory")
-output_dir = Path("your output directory")
-output_dir.mkdir(exist_ok=True)
+# 设置目录路径
+pdf_dir = Path(config["pdf_dir"])
+output_dir = Path(config["output_dir"])
 
+# EasyDoc API配置
+EASYDOC_API_KEY = config["easydoc_api_key"]
+EASYDOC_PARSE_URL = "https://api.easydoc.sh/api/v1/parse"
+EASYDOC_RESULT_URL = "https://api.easydoc.sh/api/v1/parse/{task_id}/result"
+
+
+#——————————————————————————— 主程序 ——————————————————————————————
+
+output_dir.mkdir(exist_ok=True)
 prompt = """
 # Role: 文献结构化摘要专家
 
@@ -124,35 +136,79 @@ prompt = """
 作为文献结构化摘要专家，你必须遵守上述Rules，按照Workflows执行任务，并按照Markdown格式输出，在展示核理理论框架时可以使用mermaid图表和latex公式。
 """
 
-# 判断PDF类型
-def is_text_pdf(pdf_path):
-    doc = fitz.open(pdf_path)
-    for page in doc:
-        if page.get_text():
-            return True
-    return False
-
-# 处理文字型PDF
-def process_text_pdf(pdf_file):
-    reader = PdfReader(pdf_file)
-    text_content = "\n".join(page.extract_text() for page in reader.pages)
-    return text_content
-
-# 处理图片型PDF
-def process_image_pdf(pdf_file):
+# 使用EasyDoc解析PDF
+def parse_pdf_with_easydoc(pdf_file):
     max_retries = 5
     retry_count = 0
+    
     while retry_count < max_retries:
         try:
-            file_object = client.files.create(file=pdf_file, purpose="file-extract")
-            file_content = client.files.content(file_id=file_object.id).text
-            return file_content
+            # 上传文件并获取task_id
+            with open(pdf_file, 'rb') as f:
+                files = {'file': f}
+                data = {'mode': 'premium'}
+                headers = {'api-key': EASYDOC_API_KEY}
+                
+                response = requests.post(EASYDOC_PARSE_URL, headers=headers, files=files, data=data)
+                print(f"EasyDoc API响应状态码: {response.status_code}")
+                print(f"EasyDoc API响应内容: {response.text}")
+                
+                task_id = response.json().get("data", {}).get("task_id")
+                
+                if not task_id:
+                    raise Exception(f"Failed to get task_id, API响应: {response.text}")
+                
+                # 获取解析结果
+                result_url = EASYDOC_RESULT_URL.format(task_id=task_id)
+                response = requests.get(result_url, headers=headers)
+                print(f"EasyDoc结果API响应状态码: {response.status_code}")
+                print(f"EasyDoc结果API响应内容: {response.text}")
+                json_data = response.json()
+                
+                # 构建树形结构并转换为文本
+                nodes = json_data.get("data", {}).get("task_result", {}).get("nodes", [])
+                tree = build_tree(nodes)
+                return tree_flat(tree)
+                
         except Exception as e:
             retry_count += 1
-            print(f"上传失败({retry_count}/{max_retries}): {e}")
+            print(f"解析失败({retry_count}/{max_retries}): {e}")
             if retry_count >= max_retries:
                 return None
-            time.sleep(60)
+            time.sleep(30)
+
+# EasyDoc树形结构处理函数
+def rule(node, depth):
+    txt = ""
+    if node["type"] == "Text":
+        txt = node["text"]
+    elif node["type"] == "Title":
+        title_level = "#" * depth
+        txt = f"{title_level} {node['text']}"
+    elif node["type"] in ("Table", "Figure"):
+        txt = f"""\n```{"table" if node["type"] == "Table" else "figure"}\n"""
+        txt += node.get("vlm_understanding", node["text"]) + "\n```\n"
+    return f"\n{txt}\n"
+
+
+def tree_flat(tree, depth=1):
+    rst = ""
+    for node in tree:
+        rst += rule(node, depth)
+        if node.get("type") == "Title":
+            rst += tree_flat(node["children"], depth + 1)
+    return rst
+
+
+def build_tree(nodes, parent_id=-1):
+    tree = []
+    for node in nodes:
+        if node["parent_id"] == parent_id:
+            children = build_tree(nodes, node["id"])
+            node["children"] = children
+            tree.append(node)
+    return tree
+
 
 # 与AI对话并保存结果
 def chat_with_ai(content, output_file):
@@ -186,7 +242,7 @@ def chat_with_ai(content, output_file):
 # 调用 DeepSeek API
 def call_deepseek(content, output_file):
     API_ENDPOINT = "https://api.siliconflow.cn/v1/chat/completions"
-    API_KEY = "your siliconflow api key"
+    API_KEY = config["siliconflow_key"]
     max_retries = 5
     retry_count = 0
 
@@ -255,17 +311,17 @@ for pdf_file in pdf_dir.glob("*.pdf"):
     output_file = output_dir / f"{pdf_file.stem}.md"
     
     try:
-        if is_text_pdf(pdf_file):
-            print("检测为文字型PDF，直接提取内容")
-            text_content = process_text_pdf(pdf_file)
+        # 使用EasyDoc解析PDF
+        print("使用EasyDoc解析PDF文件")
+        text_content = parse_pdf_with_easydoc(pdf_file)
+        
+        if text_content:
+            # 调用AI生成文献笔记
             if not call_deepseek(text_content, output_file):
                 failed_files.append(pdf_file.name)
         else:
-            print("检测为图片型PDF，上传处理")
-            file_content = process_image_pdf(pdf_file)
-            if file_content and not chat_with_ai(file_content, output_file):
-                failed_files.append(pdf_file.name)
-        
+            failed_files.append(pdf_file.name)
+            
         # 处理成功则记录
         processed_files.append(pdf_file.name)
         with open(processed_file, 'w') as f:
