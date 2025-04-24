@@ -1,0 +1,7 @@
+{
+  "easydoc_api_key": "your easydoc_api_key",
+  "moonshot_api_key": "your moonshot_api_key",
+  "siliconflow_key": "your siliconflow_key",
+  "pdf_dir": "your input pdf directory",
+  "output_dir": "your output directory"
+}
