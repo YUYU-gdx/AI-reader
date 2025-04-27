@@ -7,7 +7,7 @@
 - 自动识别PDF类型（文字型/图片型）
 - 支持两种AI处理引擎：
   - 月之暗面(Moonshot) API
-  - DeepSeek API
+  - siliconflow API
 - 生成符合学术规范的Obsidian笔记
 - 结构化输出Markdown格式摘要
 - 自动处理失败重试机制
