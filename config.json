@@ -1,7 +1,7 @@
 {
-  "easydoc_api_key": "your easydoc_api_key",
-  "moonshot_api_key": "your moonshot_api_key",
-  "siliconflow_key": "your siliconflow_key",
-  "pdf_dir": "your input pdf directory",
-  "output_dir": "your output directory"
+  "easydoc_api_key": "easyDoc API key",
+  "moonshot_api_key": "月之暗面 API key",
+  "siliconflow_key": "硅基流动 API key",
+  "pdf_dir": "pdf所在文件夹",
+  "output_dir": "笔记输出文件夹"
 }
